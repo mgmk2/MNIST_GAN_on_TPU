@@ -270,7 +270,7 @@ class GANModel(object):
         # 精度
         logits_real_bool = tf.cast(tf.greater_equal(logits_real, 0), tf.float32)
         logits_fake_bool = tf.cast(tf.greater_equal(logits_fake, 0), tf.float32)
-        acc_real = tf.reduce_sum(1.0 - tf.abs(1 - logits_real_bool)) / self.params.batch_size
+        acc_real = tf.reduce_sum(1.0 - tf.abs(1.0 - logits_real_bool)) / self.params.batch_size
         acc_fake = tf.reduce_sum(1.0 - tf.abs(logits_fake_bool)) / self.params.batch_size
         acc = 0.5 * (acc_real + acc_fake)
 
@@ -293,7 +293,7 @@ class GANModel(object):
 
         # 精度
         logits_bool = tf.cast(tf.greater_equal(logits, 0), tf.float32)
-        acc = tf.reduce_sum(1.0 - tf.abs(labels - logits_bool)) / self.params.batch_size
+        acc = tf.reduce_sum(1.0 - tf.abs(1.0 - logits_bool)) / self.params.batch_size
 
         # BatchNormalizationの平均と分散の更新
         # GeneratorにBatchNormalizationを入れている場合は必須

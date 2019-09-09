@@ -93,8 +93,8 @@ class GANModel(object):
 
         # 学習等のopsを定義
         inputs = input_iterator.get_next() # ネットワークの入力
-        self.train_disc_real_ops = self.train_step_disc(inputs, label=True) # Discriminatorの学習
-        self.train_disc_fake_ops = self.train_step_disc(inputs, label=False) # Discriminatorの学習
+        self.train_disc_real_ops = self.train_step_disc_real(inputs) # Discriminatorの学習
+        self.train_disc_fake_ops = self.train_step_disc_fake(inputs) # Discriminatorの学習
         self.train_gen_ops = self.train_step_gen(inputs) # Generatorの学習
         self.output_gen_ops = self.output_images_gen(inputs) # Generatorの出力
 
@@ -140,7 +140,7 @@ class GANModel(object):
         # kerasのSequentialを使っているが、Functional APIでもtensorflowの低レベルAPIでもたぶん大丈夫
 
         layers_gen = []
-        layers_gen.append(Dense(7 * 7 * 256, use_bias=False, input_shape=self.noise_shape))
+        layers_gen.append(Dense(7 * 7 * 256, use_bias=False, input_shape=self.params.noise_shape))
         layers_gen.append(BatchNormalization(momentum=0.8))
         layers_gen.append(LeakyReLU(alpha=0.2))
 
@@ -161,16 +161,35 @@ class GANModel(object):
         return generator
 
     @tpu_ops_decorator(mode='SUM')
-    def train_step_disc(self, inputs, label=True):
+    def train_step_disc_real(self, inputs):
         # Discriminatorに対して
         # コストを計算して逆伝播法で重みを更新する
 
-        features, noises = inputs # 入力データ
-        if label:
-            labels = tf.ones(tf.stack([tf.shape(features)[0], 1]), tf.float32)
-        else:
-            features = self.generator(noises, training=False) # GeneratorにBatchNormalizationを入れている場合はtraining=Falseを指定
-            labels = tf.zeros(tf.stack([tf.shape(features)[0], 1]), tf.float32)
+        features, _ = inputs # 入力データ
+        labels = tf.ones(tf.stack([tf.shape(features)[0], 1]), tf.float32)
+        logits = self.discriminator(features) # Discriminatorの出力
+
+        # コスト関数と重み更新
+        cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits, labels=labels)
+        loss = tf.reduce_sum(cross_entropy) / self.params.batch_size # reduce_meanは使わない方がいい
+        train_op_disc = self.optimizer_disc.minimize(loss, var_list=self.var_disc) # discriminatorの重みのみ更新する
+
+        # 精度
+        logits_bool = tf.cast(tf.greater_equal(logits, 0), tf.float32)
+        acc = tf.reduce_sum(1.0 - tf.abs(labels - logits_bool)) / self.params.batch_size
+
+        # 必ずtf.control_dependenciesを使うこと
+        with tf.control_dependencies([train_op_disc]):
+            return tf.identity(loss), tf.identity(acc)
+
+    @tpu_ops_decorator(mode='SUM')
+    def train_step_disc_fake(self, inputs):
+        # Discriminatorに対して
+        # コストを計算して逆伝播法で重みを更新する
+
+        _, noises = inputs # 入力データ
+        features = self.generator(noises, training=False) # GeneratorにBatchNormalizationを入れている場合はtraining=Falseを指定
+        labels = tf.zeros(tf.stack([tf.shape(features)[0], 1]), tf.float32)
         logits = self.discriminator(features) # Discriminatorの出力
 
         # コスト関数と重み更新

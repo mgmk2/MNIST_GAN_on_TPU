@@ -85,9 +85,9 @@ class GAN(object):
                         })
 
                     if self.wgan_mode:
-                        _d_loss, _d_acc = self.model.sess.run(self.model.train_disc_ops)
+                        _d_loss = self.model.sess.run(self.model.train_disc_ops)
                         d_loss += _d_loss
-                        d_acc += _d_acc
+                        d_acc += np.nan
                     else:
                         # Discriminatorを学習
                         d_loss_real, d_acc_real = self.model.sess.run(self.model.train_disc_real_ops)
@@ -118,9 +118,14 @@ class GAN(object):
                             self.model.noise_placeholder: noise # Genratorの入力
                         })
 
-                    _g_loss, _g_acc = self.model.sess.run(self.model.train_gen_ops)
-                    g_loss += _g_loss
-                    g_acc = _g_acc
+                    if self.wgan_mode:
+                        _g_loss = self.model.sess.run(self.model.train_gen_ops)
+                        g_loss += _g_loss
+                        g_acc += np.nan
+                    else:
+                        _g_loss, _g_acc = self.model.sess.run(self.model.train_gen_ops)
+                        g_loss += _g_loss
+                        g_acc = _g_acc
                 g_loss /= iter_gen_per_batch
                 g_acc /= iter_gen_per_batch
 

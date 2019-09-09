@@ -267,16 +267,9 @@ class GANModel(object):
         loss += self.gp_weight * grad_penalty
         train_op_disc = self.optimizer_disc.minimize(loss, var_list=self.var_disc) # discriminatorの重みのみ更新する
 
-        # 精度
-        logits_real_bool = tf.cast(tf.greater_equal(logits_real, 0), tf.float32)
-        logits_fake_bool = tf.cast(tf.greater_equal(logits_fake, 0), tf.float32)
-        acc_real = tf.reduce_sum(1.0 - tf.abs(1.0 - logits_real_bool)) / self.params.batch_size
-        acc_fake = tf.reduce_sum(1.0 - tf.abs(logits_fake_bool)) / self.params.batch_size
-        acc = 0.5 * (acc_real + acc_fake)
-
         # 必ずtf.control_dependenciesを使うこと
         with tf.control_dependencies([train_op_disc]):
-            return tf.identity(loss), tf.identity(acc)
+            return tf.identity(loss)
 
     @tpu_ops_decorator(mode='SUM')
     def train_step_gen_W(self, inputs):
@@ -291,10 +284,6 @@ class GANModel(object):
         loss = tf.reduce_sum(-logits) / self.params.batch_size
         train_op_gen = self.optimizer_gen.minimize(loss, var_list=self.var_gen) # Generatorの重みのみ更新
 
-        # 精度
-        logits_bool = tf.cast(tf.greater_equal(logits, 0), tf.float32)
-        acc = tf.reduce_sum(1.0 - tf.abs(1.0 - logits_bool)) / self.params.batch_size
-
         # BatchNormalizationの平均と分散の更新
         # GeneratorにBatchNormalizationを入れている場合は必須
         update_ops = self.generator.get_updates_for(None) + self.generator.get_updates_for(noises)
@@ -302,4 +291,4 @@ class GANModel(object):
         # 必ずtf.control_dependenciesを使うこと
         # BatchNormalizationを使っている場合はupdate_opsも一緒に入れる
         with tf.control_dependencies([train_op_gen, *update_ops]):
-            return tf.identity(loss), tf.identity(acc)
+            return tf.identity(loss)

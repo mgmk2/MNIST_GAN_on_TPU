@@ -8,9 +8,11 @@ from tensorflow.keras.layers import Conv2D, Conv2DTranspose
 from tensorflow.keras.models import Sequential
 
 class GANModel(object):
-    def __init__(self, params, use_tpu=False):
+    def __init__(self, params, use_tpu=False, wgan_mode=False):
         self.params = params
         self.use_tpu = use_tpu
+        self.wgan_mode = wgan_mode
+        self.gp_weight = 10
 
         if self.use_tpu:
             # TPU対応のおまじない1
@@ -93,10 +95,14 @@ class GANModel(object):
 
         # 学習等のopsを定義
         inputs = input_iterator.get_next() # ネットワークの入力
-        self.train_disc_real_ops = self.train_step_disc_real(inputs) # Discriminatorの学習
-        self.train_disc_fake_ops = self.train_step_disc_fake(inputs) # Discriminatorの学習
-        self.train_gen_ops = self.train_step_gen(inputs) # Generatorの学習
         self.output_gen_ops = self.output_images_gen(inputs) # Generatorの出力
+        if self.wgan_mode:
+            self.train_disc_ops = self.train_step_disc_W(inputs) # Discriminatorの学習
+            self.train_gen_ops = self.train_step_gen_W(inputs) # Generatorの学習
+        else:
+            self.train_disc_real_ops = self.train_step_disc_real(inputs) # Discriminatorの学習
+            self.train_disc_fake_ops = self.train_step_disc_fake(inputs) # Discriminatorの学習
+            self.train_gen_ops = self.train_step_gen(inputs) # Generatorの学習
 
         # TPU対応のおまじない2
         tf.contrib.distribute.initialize_tpu_system(self.tpu_cluster_resolver)
@@ -132,7 +138,6 @@ class GANModel(object):
         layers_disc.append(Dense(1))
 
         discriminator = Sequential(layers_disc)
-
         return discriminator
 
     def build_generator(self):
@@ -159,6 +164,12 @@ class GANModel(object):
 
         generator = Sequential(layers_gen)
         return generator
+
+    @tpu_ops_decorator(mode=None)
+    def output_images_gen(self, inputs):
+        # Generatorの出力画像を得る
+        _, noises = inputs # 入力データ
+        return self.generator(noises, training=False) # GeneratorにBatchNormalizationを入れている場合はtraining=Falseを指定
 
     @tpu_ops_decorator(mode='SUM')
     def train_step_disc_real(self, inputs):
@@ -205,12 +216,6 @@ class GANModel(object):
         with tf.control_dependencies([train_op_disc]):
             return tf.identity(loss), tf.identity(acc)
 
-    @tpu_ops_decorator(mode=None)
-    def output_images_gen(self, inputs):
-        # Generatorの出力画像を得る
-        _, noises = inputs # 入力データ
-        return self.generator(noises, training=False) # GeneratorにBatchNormalizationを入れている場合はtraining=Falseを指定
-
     @tpu_ops_decorator(mode='SUM')
     def train_step_gen(self, inputs):
         # Generatorに対して
@@ -224,6 +229,63 @@ class GANModel(object):
         # コスト関数と重み更新
         cross_entropy = tf.nn.sigmoid_cross_entropy_with_logits(logits=logits, labels=labels)
         loss = tf.reduce_sum(cross_entropy) / self.params.batch_size
+        train_op_gen = self.optimizer_gen.minimize(loss, var_list=self.var_gen) # Generatorの重みのみ更新
+
+        # 精度
+        logits_bool = tf.cast(tf.greater_equal(logits, 0), tf.float32)
+        acc = tf.reduce_sum(1.0 - tf.abs(labels - logits_bool)) / self.params.batch_size
+
+        # BatchNormalizationの平均と分散の更新
+        # GeneratorにBatchNormalizationを入れている場合は必須
+        update_ops = self.generator.get_updates_for(None) + self.generator.get_updates_for(noises)
+
+        # 必ずtf.control_dependenciesを使うこと
+        # BatchNormalizationを使っている場合はupdate_opsも一緒に入れる
+        with tf.control_dependencies([train_op_gen, *update_ops]):
+            return tf.identity(loss), tf.identity(acc)
+
+    @tpu_ops_decorator(mode='SUM')
+    def train_step_disc_W(self, inputs):
+        # Discriminatorに対して
+        # コストを計算して逆伝播法で重みを更新する
+
+        features_real, noises = inputs # 入力データ
+        features_fake = self.generator(noises, training=False) # GeneratorにBatchNormalizationを入れている場合はtraining=Falseを指定
+        ratio = tf.random.uniform(tf.stack([tf.shape(features_real)[0], 1, 1, 1]), dtype=tf.float32)
+        features_mix = ratio * features_real + (1.0 - ratio) * features_fake
+
+        logits_real = self.discriminator(features_real) # Discriminatorの出力
+        logits_fake = self.discriminator(features_fake) # Discriminatorの出力
+        logits_mix = self.discriminator(features_mix) # Discriminatorの出力
+
+        grad_mix, = tf.gradients(ys=logits_mix, xs=features_mix)
+        norm_grad_mix = tf.sqrt(tf.reduce_sum(grad_mix ** 2, axis=[1, 2, 3]))
+        grad_penalty = tf.reduce_sum((1.0 - norm_grad_mix) ** 2) / self.params.batch_size
+
+        # コスト関数と重み更新
+        loss = tf.reduce_sum(logits_fake - logits_real) / self.params.batch_size
+        loss += self.gp_weight * grad_penalty
+        train_op_disc = self.optimizer_disc.minimize(loss, var_list=self.var_disc) # discriminatorの重みのみ更新する
+
+        # 精度
+        logits_bool = tf.cast(tf.greater_equal(logits, 0), tf.float32)
+        acc = tf.reduce_sum(1.0 - tf.abs(labels - logits_bool)) / self.params.batch_size
+
+        # 必ずtf.control_dependenciesを使うこと
+        with tf.control_dependencies([train_op_disc]):
+            return tf.identity(loss), tf.identity(acc)
+
+    @tpu_ops_decorator(mode='SUM')
+    def train_step_gen_W(self, inputs):
+        # Generatorに対して
+        # コストを計算して逆伝播法で重みを更新する
+
+        _, noises = inputs # 入力データ
+        features = self.generator(noises, training=True) # GeneratorにBatchNormalizationを入れている場合はtraining=Trueを指定
+        logits = self.discriminator(features)
+
+        # コスト関数と重み更新
+        loss = tf.reduce_sum(-logits) / self.params.batch_size
         train_op_gen = self.optimizer_gen.minimize(loss, var_list=self.var_gen) # Generatorの重みのみ更新
 
         # 精度

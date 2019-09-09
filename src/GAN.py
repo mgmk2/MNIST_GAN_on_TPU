@@ -7,15 +7,16 @@ from tensorflow.keras.datasets import mnist
 from .GANModel import GANModel
 
 class GAN(object):
-    def __init__(self, params, use_tpu=False):
+    def __init__(self, params, use_tpu=False, wgan_mode=False):
         self.params = params
         self.use_tpu = use_tpu
+        self.wgan_mode = wgan_mode
 
         # データセットのロード
         self.X_train = self.load_dataset()
         self.num_batches = self.X_train.shape[0] // self.params.batch_size # ミニバッチの数
         print('number of batches:', self.num_batches)
-        self.model = GANModel(params, use_tpu=use_tpu)
+        self.model = GANModel(params, use_tpu=use_tpu, wgan_mode=wgan_mode)
 
     def tpu_decorator(func):
         def wrapper(self, *args, **kwargs):
@@ -36,7 +37,7 @@ class GAN(object):
         return X_train
 
     @tpu_decorator
-    def fit(self):
+    def fit(self, iter_disc_per_batch=1, iter_gen_per_batch=1):
         # TPU上でDiscriminatorとGeneratorを更新する
 
         start_fit = time.time()
@@ -66,41 +67,62 @@ class GAN(object):
 
             start_epoch = time.time()
 
-            # 各エポックの学習前に学習データをシャッフル
-            np.random.shuffle(self.X_train)
-
             # ミニバッチ学習
             for iter in range(self.num_batches):
-                noise = np.random.normal(0, 1, (self.params.batch_size, self.params.z_dim)).astype(np.float32) # Generatorの入力
-                image_real = self.X_train[iter * self.params.batch_size:(iter + 1) * self.params.batch_size] # Discriminatorの入力(本物)
+                d_loss = 0
+                d_acc = 0
+                for iter_disc in range(iter_disc_per_batch):
+                    noise = np.random.normal(0, 1, (self.params.batch_size, self.params.z_dim)).astype(np.float32) # Generatorの入力
+                    indices = np.random.randint(low=0, high=self.X_train.shape[0], size=self.params.batch_size)
+                    image_real = self.X_train[indices] # Discriminatorの入力(本物)
 
-                # iteratorを初期化
-                self.model.sess.run(
-                    self.model.iterator_init,
-                    feed_dict={
-                        self.model.images_placeholder: image_real, # Discriminatorの入力(本物)
-                        self.model.noise_placeholder: noise # Genratorの入力
-                    })
+                    # iteratorを初期化
+                    self.model.sess.run(
+                        self.model.iterator_init,
+                        feed_dict={
+                            self.model.images_placeholder: image_real, # Discriminatorの入力(本物)
+                            self.model.noise_placeholder: noise # Genratorの入力
+                        })
 
-                #---------------------
-                # Discriminatorの学習
-                #---------------------
-
-                # 本物画像でDiscriminatorを学習
-                d_loss_real, d_acc_real = self.model.sess.run(self.model.train_disc_real_ops)
-                # 偽物画像でDiscriminatorを学習
-                d_loss_fake, d_acc_fake = self.model.sess.run(self.model.train_disc_fake_ops)
-
-                # 本物画像の結果と偽物画像の結果を平均
-                d_loss = 0.5 * (d_loss_real + d_loss_fake)
-                d_acc = 0.5 * (d_acc_real + d_acc_fake)
+                    if self.wgan_mode:
+                        _d_loss, _d_acc = self.model.sess.run(self.model.train_disc_ops)
+                        d_loss += _d_loss
+                        d_acc += _d_acc
+                    else:
+                        # Discriminatorを学習
+                        d_loss_real, d_acc_real = self.model.sess.run(self.model.train_disc_real_ops)
+                        d_loss_fake, d_acc_fake = self.model.sess.run(self.model.train_disc_fake_ops)
+                        # 本物画像の結果と偽物画像の結果を平均
+                        d_loss += 0.5 * (d_loss_real + d_loss_fake)
+                        d_acc += 0.5 * (d_acc_real + d_acc_fake)
+                d_loss /= iter_disc_per_batch
+                d_acc /= iter_disc_per_batch
 
                 #---------------------
                 # Generatorの学習
                 #---------------------
 
+                g_loss = 0
+                g_acc = 0
                 # 本物ラベルでGeneratorを学習
-                g_loss, g_acc = self.model.sess.run(self.model.train_gen_ops)
+                for iter_gen in range(iter_gen_per_batch):
+                    noise = np.random.normal(0, 1, (self.params.batch_size, self.params.z_dim)).astype(np.float32) # Generatorの入力
+                    indices = np.random.randint(low=0, high=self.X_train.shape[0], size=self.params.batch_size)
+                    image_real = self.X_train[indices] # Discriminatorの入力(本物)
+
+                    # iteratorを初期化
+                    self.model.sess.run(
+                        self.model.iterator_init,
+                        feed_dict={
+                            self.model.images_placeholder: image_real, # Discriminatorの入力(本物)
+                            self.model.noise_placeholder: noise # Genratorの入力
+                        })
+
+                    _g_loss, _g_acc = self.model.sess.run(self.model.train_gen_ops)
+                    g_loss += _g_loss
+                    g_acc = _g_acc
+                g_loss /= iter_gen_per_batch
+                g_acc /= iter_gen_per_batch
 
                 # エポック毎の結果
                 d_loss_epoch += d_loss

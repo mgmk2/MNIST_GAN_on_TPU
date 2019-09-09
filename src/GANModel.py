@@ -268,8 +268,11 @@ class GANModel(object):
         train_op_disc = self.optimizer_disc.minimize(loss, var_list=self.var_disc) # discriminatorの重みのみ更新する
 
         # 精度
-        logits_bool = tf.cast(tf.greater_equal(logits, 0), tf.float32)
-        acc = tf.reduce_sum(1.0 - tf.abs(labels - logits_bool)) / self.params.batch_size
+        logits_real_bool = tf.cast(tf.greater_equal(logits_real, 0), tf.float32)
+        logits_fake_bool = tf.cast(tf.greater_equal(logits_fake, 0), tf.float32)
+        acc_real = tf.reduce_sum(1.0 - tf.abs(1 - logits_real_bool)) / self.params.batch_size
+        acc_fake = tf.reduce_sum(1.0 - tf.abs(logits_fake_bool)) / self.params.batch_size
+        acc = 0.5 * (acc_real + acc_fake)
 
         # 必ずtf.control_dependenciesを使うこと
         with tf.control_dependencies([train_op_disc]):
